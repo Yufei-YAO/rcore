@@ -1,0 +1,175 @@
+7月3日学习报告
+目标：Lab2 物理内存管理
+
+
+src/data_structure/mod.rs
+pub trait Allocator {
+    /// 给定容量，创建分配器
+    fn new(capacity: usize) -> Self;
+    /// 分配一个元素，无法分配则返回 `None`
+    fn alloc(&mut self) -> Option<usize>;
+    /// 回收一个元素
+    fn dealloc(&mut self, index: usize);
+}
+实现了分配器  //基于线段树
+pub type AllocatorImpl = StackedAllocator;
+
+实现细节src/data_structure/stacked_allocator.rs
+
+1.如果 OS 无法提前知道当前硬件的可用物理内存范围，请问你有何办法让 OS 获取可用物理内存范围？
+
+
+
+
+
+
+
+
+
+
+
+
+函数：
+函数签名+函数体
+方法则必须关联一个方法接收者
+
+fn hello(){
+    ...
+}
+
+//main.rs
+let fn_ptr:fn() =hello;  //必须显式声明fn()
+//否则传入的是fn() {hello}
+
+fn counter() -> fn(i32)->i32{
+    fn inc(n:i32)->i32{
+        n+1
+    }
+    inc
+}
+fn main(){
+    let f =counter();
+    f(1);
+}
+//若是需要指定增加长度
+fn counter(i:i32) -> fn(i32)->i32{
+    fn inc(n:i32)->i32{
+        n+i
+    }
+    inc
+}
+fn main(){
+    let f =counter(2);
+    f(1);
+}//编译报错 Rust不允许fn定义的函数inc捕捉动态环境 因为i会随着栈帧的释放而释放
+
+——》使用闭包
+fn counter(i: i32) -> Box<Fn(i32)->i32>{   //返回Box因为闭包编译期大小不确定
+    Box::new(move |n:i32| n+i)
+}
+fn main(){
+    let f = counter(3);
+    f(5);
+}
+闭包基本语法：
+fn val()->i32 {5}
+fn main(){
+    let add =|a:fn(),(b,c)| a()+b+c;
+    let r =add(val,(2,3));
+    //闭包参数也可以为任意类型
+}
+ 两个定义相同的闭包也不是一个类型
+
+模拟编译器对闭包的实现
+#![feature(unboxed_closures,fn_traits)]
+struct Closure{
+    env_arg:u32,
+}
+impl Fn<()> for Closure{
+    type Output =u32;
+    extern "rust_call" fn call(&self,args:()) ->u32{
+        ...
+        self.env_var+2
+    }
+}
+fn call_it<F:Fn()->u32> (f:&F)->u32{
+    f()
+}
+
+trait Any{
+    fn any<F>(&self,f:F)->bool where Self:Sized,f:Fn(u32)->bool;
+}
+impl Any for Vec<u32>{
+    fn any<F>(&self,f:F)->bool where Self:Sized,f:Fn(u32)->bool{
+        for &x in self{
+            if f(x){
+                return true;
+            }
+        }
+        false
+    }
+}
+v.any(|x| x==3);
+/*trait 参数约束*/
+
+迭代器：
+分为内部迭代器和外部迭代器
+外部迭代器“独立于容器之外，通过容器提供的方法如next来迭代，在外部控制整个迭代流程
+
+自定义内部迭代器
+trait InIterator<T:Copy>{
+    fn each<F:Fn(T) -> T>(&mut self,f:F);
+}
+
+impl<T:Copy> InIterator<T> for Vec<T>{
+    fn each<F:Fn(T) -> T>(&mut self,f:F){
+        let mut i=0;
+        while i<self.len(){
+            self[i]=f(self[i]);
+            i+=1;
+        }
+    }
+}
+rust现在倾向于使用外部迭代器
+trait Iterator{
+    type Item;
+    fn next(&mut self)->Option<Self::Item>;
+}
+struct Counter{
+    count:usize,
+}
+impl Iterator for Counter{
+    type Item =usize;
+    fn next(&mut self)->Option<Self::Item>{
+        self.count+=1;
+        if(self.count<6){
+            Some(self.count)
+        }else{
+            None
+        }
+    }
+}
+
+IntoIterator trait
+pub trait IntoIterator{
+    type Iteml
+    type IntoIter:Iterator<Item=Self::Item>;
+    fn into_iter(self) -> Self::IntoIter;
+}
+
+let mut xs =vec![1,2,3,4];
+let mut it = xs.into_iter();
+it.next();
+
+Map迭代器适配器
+
+pub trait Iterator{
+    type Item;
+
+    fn map<B,F>(self,f:F)->Map<Self,F>
+    where
+    Self:Sized,
+    F:FnMut(Self::Item)->B{
+        Map{iter:self,f:F}
+    }
+}

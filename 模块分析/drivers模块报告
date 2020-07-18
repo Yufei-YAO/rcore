@@ -1,0 +1,146 @@
+drivers模块报告
+
+如何探查计算机接入的各种外部设备？
+opensbi在启动时帮我们做了这件事  opensbi对设备进行了扫描并且将结果以DTB形式放在了物理内存中
+dtb_pa: PhysicalAddress  就是保存该文件的地址
+如何分析DTB呢我们引入了
+use device_tree::{DeviceTree, Node};模块只需要再完成几个函数 具体见device_tree.rs
+
+/*************************************************************/
+/mod.rs
+
+/// 从设备树的物理地址来获取全部设备信息并初始化  
+init(dtb_pa: PhysicalAddress)->device_tree::init(dtb_va);
+/*************************************************************/
+/device_tree.rs
+声明了device_tree模块的MAGIC码，若是扫描到的结果不等，则不是该类型的DTB
+struct DtbHeader {
+    magic: u32,
+    size: u32,
+}
+pub fn init(dtb_va: VirtualAddress)
+    验证magic->let 　Ok(dt) = DeviceTree::load(data) -> walk开始从根探查设备
+
+/// 递归遍历设备树
+fn walk(node: &Node) {
+    // 检查设备的协议支持并初始化
+    if let Ok(compatible) = node.prop_str("compatible") {
+        if compatible == "virtio,mmio" {
+            virtio_probe(node);                 
+        }
+    }
+    // 遍历子树
+    for child in node.children.iter() {
+        walk(child);
+    }
+}
+
+/*************************************************************/
+/driver.rs
+/// 驱动类型
+///
+/// 目前只有块设备，可能还有网络、GPU 设备等
+#[derive(Debug, Eq, PartialEq)]
+pub enum DeviceType {
+    Block,
+}
+//定义了 trait Driver，所有的设备类型都应该通过impl该驱动trait来实现管理
+
+pub trait Driver: Send + Sync {
+    /// 设备类型
+    fn device_type(&self) -> DeviceType;
+
+    /// 读取某个块到 buf 中（块设备接口）
+    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) -> bool 
+
+    /// 将 buf 中的数据写入块中（块设备接口）
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> bool 
+}
+
+lazy_static! {
+    /// 所有驱动
+    pub static ref DRIVERS: RwLock<Vec<Arc<dyn Driver>>> = RwLock::new(Vec::new());
+}
+用来管理所有驱动，
+RwLock：可以容纳多个读者但是同时只有一个一个写者
+/*************************************************************/
+/*************************************************************/
+bus子模块
+主要是引用了virtio_mmio
+只需要提供供virtio_mmio模块必要的函数
+/virtio_mmio.rs
+
+
+lazy_static! {
+    /// 用于放置给设备 DMA 所用的物理页（[`FrameTracker`]）
+    pub static ref TRACKERS: RwLock<BTreeMap<PhysicalAddress, FrameTracker>> =
+        RwLock::new(BTreeMap::new());
+}
+
+//为TRACKERS分配页面  但是要求分配的页面是连续的，我们的分配器只能分配单独页面，若是分配出的页面不连续要报错处理，此处待改进
+#[no_mangle]
+extern "C" fn virtio_dma_alloc(pages: usize) -> PhysicalAddress
+//删除dma页面
+#[no_mangle]
+extern "C" fn virtio_dma_dealloc(pa: PhysicalAddress, pages: usize) -> i32
+
+//线性映射区的物理地址转虚拟地址
+#[no_mangle]
+extern "C" fn virtio_phys_to_virt(pa: PhysicalAddress) -> VirtualAddress
+
+
+/// 需要注意，实现这个函数的目的是告诉 DMA 具体的请求，请求在实现中会放在栈上面
+/// 而在我们的实现中，栈是以 Framed 的形式分配的，并不是高地址的线性映射 Linear
+/// 为了得到正确的物理地址并告诉 DMA 设备，我们只能查页表
+#[no_mangle]
+extern "C" fn virtio_virt_to_phys(va: VirtualAddress) -> PhysicalAddress
+    此处调用了Mapping::look_up()
+/*************************************************************/
+/*************************************************************/
+block子模块
+/virtio_blk.rs
+调用了
+/// virtio 协议的块设备驱动
+struct VirtIOBlkDriver(Mutex<VirtIOBlk<'static>>);
+并使用Driver impl了上述驱动，只需要调用内部放法去对Driver规定的三个方法进行载入
+
+/// 将从设备树中读取出的设备信息放到 [`static@DRIVERS`] 中
+pub fn add_driver(header: &'static mut VirtIOHeader) {
+    let virtio_blk = VirtIOBlk::new(header).expect("failed to init blk driver");
+    let driver = Arc::new(VirtIOBlkDriver(Mutex::new(virtio_blk)));
+    DRIVERS.write().push(driver);
+}
+/*************************************************************/
+/mod.rs 为后面将要实现的fs定义了操作接口
+
+/// 块设备抽象（驱动的引用）
+pub struct BlockDevice(pub Arc<dyn Driver>);
+/// 为 [`BlockDevice`] 实现 [`rcore-fs`] 中 [`BlockDevice`] trait
+///
+/// 使得文件系统可以通过调用块设备的该接口来读写
+impl dev::BlockDevice for BlockDevice {
+    /// 每个块的大小（取 2 的对数）
+    /// 这里取 512B 是因为 virtio 驱动对设备的操作粒度为 512B
+    const BLOCK_SIZE_LOG2: u8 = 9;
+
+    /// 读取某个块到 buf 中
+    fn read_at(&self, block_id: usize, buf: &mut [u8]) -> dev::Result<()> {
+        match self.0.read_block(block_id, buf) {
+            true => Ok(()),
+            false => Err(dev::DevError),
+        }
+    }
+    /// 将 buf 中的数据写入块中
+    fn write_at(&self, block_id: usize, buf: &[u8]) -> dev::Result<()> {
+        match self.0.write_block(block_id, buf) {
+            true => Ok(()),
+            false => Err(dev::DevError),
+        }
+    }
+    /// 执行和设备的同步
+    ///
+    /// 因为我们这里全部为阻塞 I/O 所以不存在同步的问题
+    fn sync(&self) -> dev::Result<()> {
+        Ok(())
+    }
+}

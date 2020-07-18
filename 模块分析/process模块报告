@@ -1,0 +1,163 @@
+process模块报告
+/*************************************************************/
+/config.rs
+//! 定义一些进程相关的常量
+/// 每个线程的运行栈大小 512 KB
+pub const STACK_SIZE: usize = 0x8_0000;
+/// 共用的内核栈大小 512 KB
+pub const KERNEL_STACK_SIZE: usize = 0x8_0000;
+
+/*************************************************************/
+/mod.rs
+像模块外声明了几个可调用名称
+
+/*************************************************************/
+/thread.rs
+线程相关
+
+/// 线程的信息
+pub struct Thread {
+    /// 线程 ID
+    pub id: ThreadID,     //type = isize
+    /// 线程的栈
+    pub stack: Range<VirtualAddress>,
+    /// 所属的进程
+    pub process: Arc<RwLock<Process>>,
+    /// 用 `Mutex` 包装一些可变的变量
+    pub inner: Mutex<ThreadInner>,
+}
+
+/// 线程中需要可变的部分
+pub struct ThreadInner {
+    /// 线程执行上下文
+    ///
+    /// 当且仅当线程被暂停执行时，`context` 为 `Some`
+    pub context: Option<Context>,
+    /// 是否进入休眠
+    pub sleeping: bool,
+    /// 打开的文件
+    pub descriptors: Vec<Arc<dyn INode>>,
+}
+
+static mut THREAD_COUNTER: ThreadID = 0;
+
+impl Thread
+    pub fn prepare(&self) -> *mut Context//将当前线程准备运行
+        1.激活对应进程的memory_set
+        2.取出context
+        3.将context放入栈中准备弹出进行线程切换 1） 用户线程  放在内核栈顶
+                                            2）内核线程  放在sp下
+
+        
+    /// 发生时钟中断后暂停线程，保存状态
+    pub fn park(&self, context: Context)
+
+    /// 创建一个线程
+    pub fn new(
+        process: Arc<RwLock<Process>>,
+        entry_point: usize,
+        arguments: Option<&[usize]>,
+    ) -> MemoryResult<Arc<Thread>>
+
+    1.让当前进程分配线程栈
+    2.构建context
+    3.打包为Arc<Thread>
+    4.返回OK(thread)
+
+    //返回ThreadInner
+    pub fn inner(&self) -> spin::MutexGuard<ThreadInner> {
+        self.inner.lock()
+    }
+
+为了能够让进程调度器正确工作
+还impl 了 PartialEq,Eq和Hash
+/*************************************************************/
+process.rs
+/// 进程的信息
+pub struct Process {
+    /// 是否属于用户态
+    pub is_user: bool,
+    /// 进程中的线程公用页表 / 内存映射
+    pub memory_set: MemorySet,
+}
+
+impl Process
+    /// 创建一个内核进程
+    pub fn new_kernel() -> MemoryResult<Arc<RwLock<Self>>>
+        Self{is_user:false,memory_set:MemorySet::new_kernel()?}
+
+    /// 创建进程，从文件中读取代码
+    pub fn from_elf(file: &ElfFile, is_user: bool) -> MemoryResult<Arc<RwLock<Self>>>
+        Self {
+            is_user, //is_user同名
+            memory_set: MemorySet::from_elf(file, is_user)? //通过from_elf来分配memory_set
+        }
+    /// 分配一定数量的连续虚拟空间
+    ///
+    /// 从 `memory_set` 中找到一段给定长度的未占用虚拟地址空间，分配物理页面并建立映射。返回对应的页面区间。
+    ///
+    /// `flags` 只需包括 rwx 权限，user 位会根据进程而定。
+    pub fn alloc_page_range(
+        &mut self,
+        size: usize,
+        flags: Flags,
+    ) -> MemoryResult<Range<VirtualAddress>>
+    //为进程分配新的虚拟页面
+    1.计算好页面数
+    2.找到合适分配的虚拟页面范围
+    3.调用self.memory.add_segment()
+    4.返回Ok(虚拟地址范围)
+
+/*************************************************************/
+/kernel_stack.rs
+内核栈
+//! 用户态的线程出现中断时，因为用户栈无法保证可用性，中断处理流程必须在内核栈上进行。
+//! 所以我们创建一个公用的内核栈，即当发生中断时，会将 Context 写到内核栈顶。
+
+
+//对于用户线程 sscratch保存了内核栈（共用）的地址，对于内核线程其保存了0
+//用户态发生中断，要用sscratch替换是 sp
+
+//! ### 用户线程 [`Context`] 的存放
+//! > 1. 线程初始化时，一个 `Context` 放置在内核栈顶，`sp` 指向 `Context` 的位置
+//! >   （即栈顶 - `size_of::<Context>()`）
+//! > 2. 切换到线程，执行 `__restore` 时，将 `Context` 的数据恢复到寄存器中后，
+//! >   会将 `Context` 出栈（即 `sp += size_of::<Context>()`），
+//! >   然后保存 `sp` 至 `sscratch`（此时 `sscratch` 即为内核栈顶）
+//! > 3. 发生中断时，将 `sscratch` 和 `sp` 互换，入栈一个 `Context` 并保存数据
+
+//! ### 内核线程 [`Context`] 的存放
+//! > 1. 线程初始化时，一个 `Context` 放置在内核栈顶，`sp` 指向 `Context` 的位置
+//! >   （即栈顶 - `size_of::<Context>()`）
+//! > 2. 切换到线程，执行 `__restore` 时，将 `Context` 的数据恢复到寄存器中后，
+//! >   内核栈便不再被内核线程所使用
+//! > 3. 发生中断时，直接在 `sp` 上入栈一个 `Context`
+//! > 4. 从中断恢复时，内核线程已经从 `Context` 中恢复了 `sp`，相当于自动释放了 `Context`
+//! >   和中断处理流程所涉及的栈空间
+
+
+/// 内核栈
+#[repr(align(16))]
+#[repr(C)]
+pub struct KernelStack([u8; KERNEL_STACK_SIZE]);
+/// 公用的内核栈
+pub static KERNEL_STACK: KernelStack = KernelStack([0; KERNEL_STACK_SIZE]);
+
+/// 在栈顶加入 Context 并且返回新的栈顶指针
+    pub fn push_context(&self, context: Context) -> *mut Context
+
+
+/*************************************************************/
+processor.rs
+//调度工作
+#[derive(Default)]
+pub struct Processor {
+    /// 当前正在执行的线程
+    current_thread: Option<Arc<Thread>>,
+    /// 线程调度器，记录活跃线程
+    scheduler: SchedulerImpl<Arc<Thread>>,
+    /// 保存休眠线程
+    sleeping_threads: HashSet<Arc<Thread>>,
+}
+
+具体impl省略

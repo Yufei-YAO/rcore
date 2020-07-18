@@ -1,0 +1,100 @@
+7月2日学习报告
+目标：Lab2 物理内存管理
+
+pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocator<AllocatorImpl>>
+=Mutex::new(FrameAllocator::new(Range::from(
+            PhysicalPageNumber::ceil(PhysicalAddress::from(*KERNEL_END_ADDRESS))..PhysicalPageNumber::floor(MEMORY_END_ADDRESS),）
+
+
+src/memory/range.rs
+定义 Range<T>
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Range<T: From<usize> + Into<usize> + Copy> {
+    pub start: T,
+    pub end: T,
+}
+为Range<T>实现from方法 从 FrameAllocator<AllocatorImpl> 到自定义Range<T>类型转换
+impl<T: From<usize> + Into<usize> + Copy, U: Into<T>> From<core::ops::Range<U>> for Range<T> {
+    fn from(range: core::ops::Range<U>) -> Self {
+        Self {
+            start: range.start.into(),
+            end: range.end.into(),
+        }
+    }
+}
+得到一个FrameAllocator<AllocatorImpl>类型Mutex指针
+
+src/memory/address 实现了
+关于PhysicalPageNumber和PhysicalAddress的方法
+
+
+/// 基于线段树的帧分配 / 回收
+pub struct FrameAllocator<T: Allocator> {
+    /// 可用区间的起始
+    start_ppn: PhysicalPageNumber,
+    /// 分配器
+    allocator: T,
+}
+实现了 
+    pub fn new(range: impl Into<Range<PhysicalPageNumber>> + Copy) -> Self
+
+    pub fn alloc(&mut self) -> MemoryResult<FrameTracker>
+//其中 pub type MemoryResult<T> = Result<T, &'static str>;
+
+    pub(super) fn dealloc(&mut self, frame: &FrameTracker)
+
+
+
+
+
+
+
+
+
+深入trait:
+trait是Rust对ad-hoc的支持
+trait有四种用法： 接口抽象，范型约束，抽象类型，标签trait
+
+接口抽象：
+接口中可以定义方法，并支持默认实现
+接口中不能实现另一个接口，但是接口之间可以继承
+同一个接口可以同时被多个类型实现，但不能被同一个类型实现多次
+trait用来定义接口，impl关键字用来为类型实现接口方法
+
+关联类型：
+trait Add<RHS,Output>{
+    fn my_add(self,rhs:RHS)->Output;
+}
+
+impl Add<i32,i32> for i32{
+    fn my_add(self,rhs:i32)->i32{
+        self +rhs
+    }
+}
+//trait中定义的泛型参数事实上都被impl明确了 所以impl后面可不加<T>
+
+简化->
+pub trait Add<RHS = Self>{
+    type Output;
+    fn add(self,rhs:RHS) -> Self::Output;
+}
+impl Add for u32{
+    type Output = u32;
+    fn add(self,rhs:u32) -> u32/*Self::Output */;
+}
+
+举例：为String 实现 +&str操作
+impl Add<&str> for Stirng{
+    type Output= String;
+    fn add(mut self,rhs:&str) -> String{
+        self.push_str(rhs)
+    }
+}
+
+trait继承：
+trait Paginate: Page + PerPage{
+    ...
+}
+//所impl的类必须先impl Page和PerPage
+
+

@@ -1,0 +1,113 @@
+filesystem模块报告
+//本core使用了simple filesystem 模块
+/*************************************************************/
+/config.rs
+
+/// 块设备的 Cache 块个数
+pub const BLOCK_CACHE_CAPACITY: usize = 0x10;
+/*************************************************************/
+/mod.rs
+
+找到了文件系统根目录并赋值到ROOT_INODE 
+pub static ref ROOT_INODE: Arc<dyn INode> ={};
+
+init()  ->ROOT_INODE.ls();
+
+
+/*************************************************************/
+/inode_ext.rs
+给INode扩展了几个功能
+
+pub trait INodeExt {
+    /// 打印当前目录的文件
+    fn ls(&self);
+
+    /// 读取文件内容
+    fn readall(&self) -> Result<Vec<u8>>;
+}
+
+impl INodeExt for INode
+    ls()   主要调用了 self.get_entry(id)
+
+fn get_entry(&self,id:usize)->vfs::Result<String>
+读取名字
+
+    fn readall(&self) -> Result<Vec<u8>> {
+        // 从文件头读取长度
+        let size = self.metadata()?.size;   //？的作用是打开Result<>包装 并且要求返回OK
+        // 构建 Vec 并读取
+        let mut buffer = Vec::with_capacity(size);
+        unsafe { buffer.set_len(size) };
+        self.read_at(0, buffer.as_mut_slice())?;
+        Ok(buffer)
+    }
+
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> vfs::Result<usize>; //INode中的读入方法
+
+
+
+/*************************************************************/
+/stdin.rs
+
+lazy_static! {
+    pub static ref STDIN: Arc<Stdin> = Default::default();
+}
+/// 控制台键盘输入，实现 [`INode`] 接口  //需要在interrupt  handler init()中打开对应的允许位
+#[derive(Default)]
+pub struct Stdin {
+    /// 从后插入，前段弹出
+    buffer: Mutex<VecDeque<u8>>,
+    /// 条件变量用于使等待输入的线程休眠
+    condvar: Condvar,
+}
+
+并且把Stdin实现为文件 即impl INode
+
+但是 write和poll是Err的
+
+    /// Read bytes at `offset` into `buf`, return the number of bytes read.
+    fn read_at(&self, offset: usize, buf: &mut [u8]) -> Result<usize> {
+        if offset != 0 {
+            // 不支持 offset
+            Err(FsError::NotSupported)
+        } else if self.buffer.lock().len() == 0 {
+            // 缓冲区没有数据，将当前线程休眠
+            self.condvar.wait();
+            Ok(0)
+        } else {
+            let mut stdin_buffer = self.buffer.lock();
+            for (i, byte) in buf.iter_mut().enumerate() {
+                if let Some(b) = stdin_buffer.pop_front() {
+                    *byte = b;
+                } else {
+                    return Ok(i);
+                }
+            }
+            Ok(buf.len())
+        }
+    }
+
+/*************************************************************/
+/stdout.rs
+类似stdin
+lazy_static! {
+    pub static ref STDOUT: Arc<Stdout> = Default::default();
+}
+
+/// 控制台输出
+#[derive(Default)]
+pub struct Stdout;
+impl INode for Stdout
+    fn write_at(&self, offset: usize, buf: &[u8]) -> Result<usize> {
+        if offset != 0 {
+            Err(FsError::NotSupported)
+        } else if let Ok(string) = core::str::from_utf8(buf) {
+            print!("{}", string);
+            Ok(buf.len())
+        } else {
+            Err(FsError::InvalidParam)
+        }
+    }
+
+
+

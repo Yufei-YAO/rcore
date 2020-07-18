@@ -1,0 +1,276 @@
+memory模块报告
+///基础定义模块
+/*************************************************************/
+/config.rs
+内核常量的一些定义
+pub const DEVICE_START_ADDRESS
+pub const DEVICE_END_ADDRESS
+pub const MEMORY_START_ADDRESS
+pub const MEMORY_END_ADDRESS
+pub static ref KERNEL_END_ADDRESS   由于他是根据内核link的时候的kernel_end结束位置初始化的为运行时才知道结果，所以使用lazy_static!进行设置
+pub const KERNEL_HEAP_SIZE
+pub const KERNEL_MAP_OFFSET:
+
+/*************************************************************/
+/address.rs
+内核运行时使用的物理/虚拟地址，物理/虚拟页号的包装及一些常见的运算符
+#[repr(C)]   //以c语言模式按位排版
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]  //一些简单trait的自动实现 *全部为复制语意
+pub struct VirtualAddress(pub usize);
+pub struct PhysicalAddress(pub usize);
+pub struct VirtualPageNumber(pub usize);
+pub struct PhysicalPageNumber(pub usize);
+
+接着定义了一些转换操作
+*const T   <-> VirtualAddress
+*mut T <->  VirtualAddress
+
+
+PhysicalPageNumber   <->  VirtualPageNumber   //内核代码才行
+PhysicalAddress   <->  VirtualAddress  //内核代码才行
+
+PhysicalAddress <-> PhysicalPageNumber
+VirtualAddress <-> VirtualPageNumber
+
+以及usize与上述个类型之间的转换  包括into  from   + - += 等等
+语法细节不再列出
+
+VirtualPageNumber和 VirtualAddress 设计了deref()自动解引用功能  返回了&'static mut [T] 和  &'static mut [u8; PAGE_SIZE] 
+
+PhysicalAddress和 PhysicalPageNumber 设计了deref_kernel()功能  //采用线性映射的部分可用调用了virtual部分的解引用
+why？Sv39模式已经打开，对所有地址的访问都应该建立在虚拟地址之上
+
+/*************************************************************/
+/mod.rs
+init()
+主要是调用了heap::init()
+unsafe { riscv::register::sstatus::set_sum() }; //以及设置允许内核读写用户态内存
+
+
+
+/heap.rs 打开内核动态内存分配功能，以便使用box  vec等需要动态内存支持的结构的使用
+使用了外界的库   use buddy_system_allocator::LockedHeap;
+
+static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];   //由于初始化为0 ，故会被放在.bss段中
+
+
+#[global_allocator]   //设置分配器 
+static HEAP: LockedHeap = LockedHeap::empty();  
+
+/// 初始化操作系统运行时堆空间
+pub fn init() {
+    // 告诉分配器使用这一段预留的空间作为堆
+    unsafe {
+        HEAP.lock()
+            .init(HEAP_SPACE.as_ptr() as usize, KERNEL_HEAP_SIZE)
+    }
+}
+
+/// 空间分配错误的回调，直接 panic 退出
+#[alloc_error_handler]  //设置失败操作
+fn alloc_error_handler(_: alloc::alloc::Layout) -> ! {
+    panic!("alloc error")
+}
+/*************************************************************/
+/range.rs    创建了一个Range<T> 为简化的core::ops::range 并且impl了几个功能    
+如果不重新声明一个Range<T>  直接使用默认的则会impl for type defined outside of crate.
+
+//为后期分配连续虚拟页面做准备  VirtualPageNumber
+// 表示一段连续的页面
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Range<T: From<usize> + Into<usize> + Copy> {      //T类型被限制为支持 usize <-> T 以及Copy语意
+    pub start: T,
+    pub end: T,
+}
+impl<T:From<usize>+Into<usize>+Copy,U:Into<T>> From<core::ops::Range<U>> for Range<T>{
+    fn from(range: core::ops::Range<U>)->Self{
+        Self{
+            start:range.start.into();
+            end:end.start.into();
+        }
+    }
+}
+
+
+
+impl<T: From<usize> + Into<usize> + Copy >  Range<T>{
+    /// 检测两个 [`Range`] 是否存在重合的区间
+    pub fn overlap_with(&self, other: &Range<T>) -> bool 
+    /// 迭代区间中的所有页
+    pub fn iter(&self) -> impl Iterator<Item = T>     //wait for study
+    /// 区间大小  
+    pub fn len(&self) -> usize
+    /// 支持物理 / 虚拟页面区间互相转换
+    pub fn into<U: From<usize> + Into<usize> + Copy + From<T>>(self) -> Range<U>  //wait for study
+    /// 从区间中用下标取元素 
+    pub fn get(&self, index: usize) -> T
+    /// 区间是否包含指定的值
+    pub fn contains(&self, value: T) -> bool
+}
+
+
+/*************************************************************/
+/*************************************************************/
+///子模块 frame  主要用于物理内存的分配
+/mod.rs
+pub use 将后面的跟随的模块中的功能函数引入当前作用域，向外暴露接口
+pub use allocator::FRAME_ALLOCATOR;
+pub use frame_tracker::FrameTracker;
+
+
+/*************************************************************/
+/allocator.rs    //物理内存帧分配器
+
+定义了分配器
+pub struct FrameAllocator<T: Allocator> {
+    /// 可用区间的起始
+    start_ppn: PhysicalPageNumber,
+    /// 分配器
+    allocator: T,
+}
+初始化一个静态变量为全局物理内存帧分配器，以后分配内存都是通过FRAME_ALLOCATOR的操作。
+lazy_static! {
+    /// 帧分配器
+    pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocator<AllocatorImpl>> = Mutex::new(FrameAllocator::new(Range::from(
+            PhysicalPageNumber::ceil(PhysicalAddress::from(*KERNEL_END_ADDRESS))..PhysicalPageNumber::floor(MEMORY_END_ADDRESS),
+        )
+    ));
+}
+//操作内存时需要格外小心，Mutex保证同一个实践最多只有一个线程可以操作内存的分配和释放，避免出错
+
+//其中的 AllocatorImpl  从外部 algorithm导入   //之后介绍
+
+impl<T: Allocator> FrameAllocator<T>{
+    //创建一个FrameAllocator<T>对象
+    pub fn new(range: impl Into<Range<PhysicalPageNumber>> + Copy)->Self
+    /// 分配帧，如果没有剩余则返回 `Err`
+    pub fn alloc(&mut self) -> MemoryResult<FrameTracker>
+
+    /// 将被释放的帧添加到空闲列表的尾部
+    ///
+    /// 这个函数会在 [`FrameTracker`] 被 drop 时自动调用，不应在其他地方调用
+    pub(super) fn dealloc(&mut self, frame: &FrameTracker)
+     
+    //FrameTracker和对应物理帧进行了某种绑定，drop了一个Frametracker之后其所代表的物理帧同时被释放
+}
+
+
+/*************************************************************/
+/frame_tracker.rs
+
+pub struct FrameTracker(pub(super) PhysicalPageNumber);  //定义  内含物理页编号的封装，其对应了一个物理帧
+pub(in super)  代表memory模块可以直接访问 再外层就不行了
+
+impl FrameTracker {
+    /// 帧的物理地址
+    pub fn address(&self) -> PhysicalAddress {
+        self.0.into()
+    }
+    /// 帧的物理页号
+    pub fn page_number(&self) -> PhysicalPageNumber {
+        self.0
+    }
+}
+
+并且FrameTracker支持自动解引用为 &[u8; PAGE_SIZE]   &mut [u8; PAGE_SIZE] 
+
+/// 帧在释放时会放回 [`static@FRAME_ALLOCATOR`] 的空闲链表中
+impl Drop for FrameTracker {
+    fn drop(&mut self) {
+        FRAME_ALLOCATOR.lock().dealloc(self);
+    }
+}
+
+/*************************************************************/
+/*************************************************************/
+///子模块 mapping 主要用于虚拟内存的映射
+/mod.rs
+
+//! 内存映射
+//!
+//! 每个线程保存一个 [`Mapping`]，其中记录了所有的字段 [`Segment`]。
+//! 同时，也要追踪为页表或字段分配的所有物理页，目的是 drop 掉之后可以安全释放所有资源。
+
+
+/*************************************************************/
+/segment.rs
+描述了内存段，映射类型（线性/非线性）  虚拟地址范围   权限
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub struct Segment {
+    /// 映射类型
+    pub map_type: MapType,
+    /// 所映射的虚拟地址
+    pub range: Range<VirtualAddress>,
+    /// 权限标志
+    pub flags: Flags,
+}
+
+impl
+    pub fn iter_mapped(&self) -> Option<impl Iterator<Item = PhysicalPageNumber>>
+    对于内核段，可以将某segment中连续的虚拟页导出为物理页帧
+    对于其他段，返回None
+    pub fn page_range(&self) -> Range<VirtualPageNumber>
+    获得对一段物理地址，转换为页区间
+
+此处与range.rs的语法细节需注意
+
+/*************************************************************/
+/page_table_entry.rs
+页表项
+#[derive(Copy, Clone, Default)]
+pub struct PageTableEntry(usize);   //长度为64
+实现了常见的几种功能，详细不再列出
+
+
+/*************************************************************/
+/page_table.rs
+页表结构，一般不再单独在栈上或堆上分配，而是直接从物理页面分配器中取出一页与Tracker做绑定
+#[repr(C)]
+pub struct PageTable {
+    pub entries: [PageTableEntry; PAGE_SIZE / 8],
+}
+pub struct PageTableTracker(pub FrameTracker);   //不可Copy
+
+impl PageTableTracker {
+    /// 将一个分配的帧清零，形成空的页表
+    pub fn new(frame: FrameTracker) -> Self {
+        let mut page_table = Self(frame);
+        page_table.zero_init();   //为什么可以这样子使用？ 因为PageTableTracker在下面实现了自动derefmut，返回了一个PageTable的可变引用
+        page_table
+    }
+    /// 获取物理页号
+    pub fn page_number(&self) -> PhysicalPageNumber {
+        self.0.page_number()
+    }
+}
+
+/*************************************************************/
+/mapping.rs
+#[derive(Default)]
+/// 某个进程的内存映射关系
+pub struct Mapping {
+    /// 保存所有使用到的页表
+    page_tables: Vec<PageTableTracker>,
+    /// 根页表的物理页号
+    root_ppn: PhysicalPageNumber,
+}
+
+
+/*************************************************************/
+/memory_set.rs
+
+/// 一个进程所有关于内存空间管理的信息
+pub struct MemorySet {
+    /// 维护页表和映射关系
+    pub mapping: Mapping,
+    /// 每个字段
+    pub segments: Vec<Segment>,
+    /// 所有分配的物理页面映射信息
+    pub allocated_pairs: Vec<(VirtualPageNumber, FrameTracker)>,
+}
+
+pub fn new_kernel() -> MemoryResult<MemorySet> 对内核重映射，新建进程应该首先使用
+pub fn from_elf(file: &ElfFile, is_user: bool) -> MemoryResult<MemorySet>  从elf文件新建内存映射
+
+
+

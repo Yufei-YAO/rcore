@@ -1,0 +1,41 @@
+6月30日学习报告
+目标：Lab2 动态内存分配 and 物理内存探测
+
+动态内存分配： 类似于C++中malloc函数作用，可以使操作系统内核在运行时创建或者销毁内存块
+应用场景： Box Arc 以及std中vec等容器进行内存申请
+支持方法：实现一个支持Trait GlobalAlloc的类，将其实例化并且使用#[global_allocator] 标记进行标记
+具体实现：
+
+使用了@jiege 开发的 Buddy System Allocator类，并且在heap.rs文件中对其进行了实例化
+
+思考题：动态分配的内存地址在哪个范围里？
+答：heap.rs 中的声明static mut HEAP_SPACE: [u8; KERNEL_HEAP_SIZE] = [0; KERNEL_HEAP_SIZE];使用一个数组作为堆空间，
+由于该数组初始化为全0 ，所以应该在.bss段中。
+
+结果：可以使用alloc中的一些需要动态内存分配的类如
+alloc::boxed::Box;
+alloc::vec::Vec;
+
+
+物理内存探测：
+默认的 DRAM 物理内存地址范围 [0x80000000, 0x88000000) 共128M大小
+为了以后的更复杂应用，将代表物理地址位置的usize封装为
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct PhysicalAddress(pub usize);
+
+同时编码出一个指向内核代码结束位置的指针变量
+lazy_static! {
+    /// 内核代码结束的地址，即可以用来分配的内存起始地址
+    ///
+    /// 因为 Rust 语言限制，我们只能将其作为一个运行时求值的 static 变量，而不能作为 const
+    pub static ref KERNEL_END_ADDRESS: PhysicalAddress = PhysicalAddress(kernel_end as usize);
+}
+静态全局变量的声明方式：
+static AGE:u32 = 18;
+但是这种声明方式并不能初始化动态数组
+lazy_static! {
+    static ref VEC:Vec<u8> = vec![0x18u8, 0x11u8];
+}  可以成功使用
+运行时初始化
+注意在使用时需要解引用。

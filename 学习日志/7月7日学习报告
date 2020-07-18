@@ -1,0 +1,118 @@
+7月7日学习报告
+目标 :   
+        Lab5 设备与文件系统
+        Lab6 用户进程
+
+
+        
+Lab5   
+1.设备树的概念和读取
+Opensbi来完成对于包括物理内存在内的各外设的扫描，将扫描结果以设备树二进制对象
+（DTB，Device Tree Blob）的格式保存在物理内存中的某个地方
+#[no_mangle]                  //a0                    //a1
+pub extern "C" fn rust_main(_hart_id: usize, dtb_pa: PhysicalAddress) -> !
+
+
+解析设备树
+对于上面的属性，我们不需要自己来实现这件事情，可以直接调用 rCore 中 device_tree 库
+
+解析设备树  rCore device_tree库，不需要自己实现
+实现 对 "virtio,mmio" 的节点的判断，
+
+/// 递归遍历设备树
+fn walk(node: &Node)
+若是检测到virtio,mmio 进行probe
+遍历递归子树
+
+/// 整个设备树的 Headers（用于验证和读取）
+struct DtbHeader {
+    magic: u32,
+    size: 
+
+pub fn init(dtb_va: VirtualAddress)
+    验证magic -》 walk(&dt.root)
+
+2.virtio总线协议
+主要针对于半虚拟化技术中对通用设备的抽象
+
+/// 从设备树的某个节点探测 virtio 协议具体类型
+pub fn virtio_probe(node: &Node)
+
+lazy_static! {
+    /// 用于放置给设备 DMA 所用的物理页（[`FrameTracker`]）
+    pub static ref TRACKERS: RwLock<BTreeMap<PhysicalAddress, FrameTracker>> =
+        RwLock::new(BTreeMap::new());
+}
+
+/// 为 DMA 操作申请连续 pages 个物理页（为 [`virtio_drivers`] 库提供）
+#[no_mangle]
+extern "C" fn virtio_dma_alloc(pages: usize) -> PhysicalAddress
+
+/// 为 DMA 操作释放对应的之前申请的连续的物理页（为 [`virtio_drivers`] 库提供）
+#[no_mangle]
+extern "C" fn virtio_dma_dealloc(pa: PhysicalAddress, pages: usize) -> i32
+
+/// 将物理地址转为虚拟地址（为 [`virtio_drivers`] 库提供）
+#[no_mangle]
+extern "C" fn virtio_phys_to_virt(pa: PhysicalAddress) -> VirtualAddress
+
+/// 将虚拟地址转为物理地址（为 [`virtio_drivers`] 库提供）
+#[no_mangle]
+extern "C" fn virtio_virt_to_phys(va: VirtualAddress) -> PhysicalAddress
+
+3.块设备驱动的实现
+驱动类型
+#[derive(Debug, Eq, PartialEq)]
+pub enum DeviceType {
+    Block,
+}
+
+/// 驱动的接口
+pub trait Driver: Send + Sync 
+    /// 设备类型
+    fn device_type(&self) -> DeviceType;
+    /// 读取某个块到 buf 中（块设备接口）
+    fn read_block(&self, _block_id: usize, _buf: &mut [u8]) -> bool
+
+    /// 将 buf 中的数据写入块中（块设备接口）
+    fn write_block(&self, _block_id: usize, _buf: &[u8]) -> bool 
+
+lazy_static! {
+    /// 所有驱动
+    pub static ref DRIVERS: RwLock<Vec<Arc<dyn Driver>>> = RwLock::new(Vec::new());
+}
+
+
+/// 块设备抽象  用来与文件系统建立连接
+pub struct BlockDevice(pub Arc<dyn Driver>);
+impl dev::BlockDevice
+    fn read_at(&self, block_id: usize, buf: &mut [u8]) -> dev::Result<()>
+
+    fn write_at(&self, block_id: usize, buf: &[u8]) -> dev::Result<()>
+
+
+
+本实验里的使用，真正的读写物理块设备
+struct VirtIOBlkDriver(Mutex<VirtIOBlk<'static>>);
+这一种库里面提供的块设备模型，
+所有的快设备都底层都由这个struct来执行
+ 
+4.将块设备托管给文件系统
+
+rcore 文件系统分析
+
+设备驱动层 Device Driver
+
+抽象设备层 Device
+
+块缓存层 BLock Cache
+
+VFS层
+
+文件描述符层
+
+系统调用层
+
+
+Lab6 
+

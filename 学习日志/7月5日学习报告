@@ -1,0 +1,361 @@
+7月5日学习报告
+目标：Lab3 虚拟内存管理
+
+
+为了减少用户程序的设计复杂度，操作系统对内存做了统一抽象，各种程序通过自己的虚拟地址空间来访问内存，而操作系统则负责做虚拟地址到物理地址的映射
+
+
+linker.ld
+上一章
+/* 数据存放起始地址 */
+BASE_ADDRESS = 0x80200000;
+Lab3将数据存放地址改为虚拟地址表示
+
+OpenSBI 将自身放在 0x80000000，完成初始化后会跳转到 0x80200000，
+因此 _start 必须位于这个地址。
+
+
+
+设置了操作系统代码的起始地址为虚拟地址 0xffffffff80200000;    //
+/* 数据存放起始地址 */
+BASE_ADDRESS = 0xffffffff80200000; /* 修改为虚拟地址 */
+
+物理内存状态：OpenSBI 代码放在 [0x80000000,0x80200000) 中，内核代码放在以 0x80200000 开头的一块连续物理内存中。
+
+内核代码：由于改动了链接脚本的起始地址，os内核认为自己处在以虚拟地址 0xffffffffc0200000 开头的一段连续虚拟地址空间中。
+所以rust编写的所有内容的地址起点 0xffffffff80200000; 但是汇编entry.asm中的代码却采用的是直接物理地址访问形式
+
+
+根据os的设计，最后操作系统应该建立从物理地址0x80200000到虚拟地址 0xffffffff80200000的映射，此处使用线性映射的转换关系;
+pub const KERNEL_MAP_OFFSET: usize = 0xffff_ffff_0000_0000;
+
+建立一个粗糙的页表，便于_strat 程序跳转到rust_main；
+# 初始内核映射所用的页表
+    .section .data
+    .align 12
+boot_page_table:
+    .quad 0
+    .quad 0
+    # 第 2 项：0x8000_0000 -> 0x8000_0000，0xcf 表示 VRWXAD 均为 1
+    .quad (0x80000 << 10) | 0xcf
+    .zero 507 * 8
+    # 第 510 项：0xffff_ffff_8000_0000 -> 0x8000_0000，0xcf 表示 VRWXAD 均为 1
+    .quad (0x80000 << 10) | 0xcf
+    .quad 0
+
+此处采用大页形式RWX不都为0 即3级页表本身就为叶子节点
+
+除了从 0xffffffff80000000 到 0x80000000 这个映射，我们的 boot_page_table 里面为什么还有一个从 0x80000000 到 0x80000000 的映射？
+答:在    csrw satp, t0
+        sfence.vma  到 开启了虚拟地址映射访问模式
+        为使直到
+        jr t0; 之间的指令为了能正确访问而必须要建立映射
+
+
+src/memory/address.rs
+
+虚拟地址设计
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct VirtualAddress(pub usize);
+
+/// 虚拟页号
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct VirtualPageNumber(pub usize);
+
+implement_usize_operations!  使Physical/Virtual address/pagenumber  实现与usize的 +，-等常用运算符的构建
+implement_address_to_page_number! 实现了地址与页编号的相互转换
+
+/// 从指针转换为虚拟地址
+impl<T> From<*const T /*  *mut T   */> for VirtualAddress {
+    fn from(pointer: *const T) -> Self {
+        Self(pointer as usize)
+    }
+}
+
+/// 实页号 -》虚页号   + KERNEL_MAP_OFFSET/PAGE_SIZE   此处针对仅内核的映射
+impl From<PhysicalPageNumber> for VirtualPageNumber {
+    fn from(ppn: PhysicalPageNumber) -> Self {
+        Self(ppn.0 + KERNEL_MAP_OFFSET / PAGE_SIZE)
+    }
+}
+
+/// 虚实地址之间的线性映射   省略
+///多种值之间的转换
+//虽然RUST 本身不支持函数重载，但是可以通过 范型trait进行重载， From<T>正是一个trait
+*const T   -> VirtualAddress
+*mut T   -> VirtualAddress
+PhysicalPageNumber  <->  VirtualPageNumber  此处针对仅内核的映射
+PhysicalAddress <->  VirtualAddress         此处针对仅内核的映射 
+
+PhysicalAddress <-> PhysicalPageNumber
+VirtualAddress <-> VirtualPageNumber
+usize <-> ALL;
+
+
+
+
+
+///
+impl VirtualAddress {
+    /// 从虚拟地址取得某类型的 &mut 引用
+    pub fn deref<T>(self) -> &'static mut T {
+        unsafe { &mut *(self.0 as *mut T) }
+    }
+    /// 取得页内偏移
+    pub fn page_offset(&self) -> usize {
+        self.0 % PAGE_SIZE
+    }
+}
+
+impl PhysicalAddress {
+    /// 从物理地址经过线性映射取得 &mut 引用
+    pub fn deref_kernel<T>(self) -> &'static mut T {
+        VirtualAddress::from(self).deref()
+    }
+    /// 取得页内偏移
+    pub fn page_offset(&self) -> usize {
+        self.0 % PAGE_SIZE
+    }
+}
+impl VirtualPageNumber {
+    /// 从虚拟地址取得页面
+    pub fn deref(self) -> &'static mut [u8; PAGE_SIZE] {
+        VirtualAddress::from(self).deref()
+    }
+}
+impl PhysicalPageNumber {
+    /// 从物理地址经过线性映射取得页面
+    pub fn deref_kernel(self) -> &'static mut [u8; PAGE_SIZE] {
+        PhysicalAddress::from(self).deref_kernel()
+    }
+}
+
+页表设计
+
+页表项
+#[derive(Copy, Clone, Default)]    //entry为复制语意
+pub struct PageTableEntry(usize);
+    /// 将相应页号和标志写入一个页表项
+    pub fn new(page_number: PhysicalPageNumber, flags: Flags) -> Self
+    /// 获取页号
+    pub fn page_number(&self) -> PhysicalPageNumber
+    /// 获取地址
+    pub fn address(&self) -> PhysicalAddress
+    ///获取标识位
+    pub fn flags(&self) -> Flags
+    ///是否为空 ，即所有位为0
+    pub fn is_empty(&self) -> bool
+
+页表
+/// 存有 512 个页表项的页表
+///
+/// 注意我们不会使用常规的 Rust 语法来创建 `PageTable`。相反，我们会分配一个物理页，
+/// 其对应了一段物理内存，然后直接把其当做页表进行读写。我们会在操作系统中用一个「指针」
+/// [`PageTableTracker`] 来记录这个页表。
+#[repr(C)]
+pub struct PageTable {
+    pub entries: [PageTableEntry; PAGE_SIZE / 8],
+}
+
+impl PageTable {
+    /// 将页表清零
+    pub fn zero_init(&mut self) {
+        self.entries = [Default::default(); PAGE_SIZE / 8];
+    }
+}
+
+pub struct PageTableTracker(pub FrameTracker);   //封装了一个FramTracker  FramTracker未定义Copy 所以仅能转移所有权构建，避免一个页面多个Tracker
+
+//FrameTracker 里面封装的是分配器分配出来的物理页号
+impl PageTableTracker {
+    /// 将一个分配的帧清零，形成空的页表
+    pub fn new(frame: FrameTracker) -> Self {
+        let mut page_table = Self(frame);
+        page_table.zero_init();
+        page_table
+    }
+    /// 获取物理页号
+    pub fn page_number(&self) -> PhysicalPageNumber {
+        self.0.page_number()
+    }
+}
+
+// PageTableEntry 和 PageTableTracker 都可以 deref 到对应的 PageTable
+// （使用线性映射来访问相应的物理地址）  
+impl core::ops::Deref for PageTableTracker {
+    type Target = PageTable;
+    fn deref(&self) -> &Self::Target {
+        self.0.address().deref_kernel()
+    }
+}
+
+段描述
+/// 映射的类型
+#[derive(Debug)]
+pub enum MapType {
+    /// 线性映射，操作系统使用
+    Linear,   //只针对内核做平移映射
+    /// 按帧分配映射
+    Framed,
+}
+
+/// 一个映射片段（对应旧 tutorial 的 `MemoryArea`）
+#[derive(Debug)]
+pub struct Segment {
+    /// 映射类型
+    pub map_type: MapType,
+    /// 所映射的虚拟地址
+    pub page_range: Range<VirtualPageNumber>,    //虚拟页范围
+    /// 权限标志
+    pub flags: Flags,
+}
+    pub fn iter_mapped(&self) -> Option<impl Iterator<Item = PhysicalPageNumber>>
+    ///为内核页 确定物理页号的迭代器
+
+页表、内存段的封装
+#[derive(Default)]
+/// 某个线程的内存映射关系
+pub struct Mapping {
+    /// 保存所有使用到的页表
+    page_tables: Vec<PageTableTracker>,
+    /// 根页表的物理页号
+    root_ppn: PhysicalPageNumber,
+}
+    ///将当前页表 active
+    pub fn activate(&self)
+    /// 创建一个有根节点的映射
+    pub fn new() -> MemoryResult<Mapping>
+    ///对当前段创建映射(liner的内核段只需要构建页表 不需要再次分配空间)
+     pub fn map(
+        &mut self,
+        segment: &Segment,
+        init_data: Option<&[u8]>,
+    ) -> MemoryResult<Vec<(VirtualPageNumber, FrameTracker)>> 
+
+    /// 移除一段映射
+    pub fn unmap(&mut self, segment: &Segment)  
+     /// 如果找不到对应的页表项，则会相应创建页表
+    pub fn find_entry(&mut self, vpn: VirtualPageNumber) -> MemoryResult<&mut PageTableEntry>
+    /// 查找虚拟地址对应的物理地址
+    pub fn lookup(va: VirtualAddress) -> Option<PhysicalAddress>
+    /// 为给定的虚拟 / 物理页号建立映射关系  
+    fn map_one
+
+总封装
+/// 一个线程所有关于内存空间管理的信息
+pub struct MemorySet {
+    /// 维护页表和映射关系
+    pub mapping: Mapping,
+    /// 每个字段
+    pub segments: Vec<Segment>,
+}
+其中存的将会是「它看到的虚拟内存空间分成的内存段」和「这些段中包含的虚拟页到物理页的映射
+    pub fn new_kernel() -> MemoryResult<MemorySet> 内核页表重建
+
+/// 通过 elf 文件创建内存映射（不包括栈）     ///待学习
+    // todo: 有可能不同的字段出现在同一页？
+    pub fn from_elf(file: &ElfFile, is_user: bool) -> MemoryResult<MemorySet>  
+
+    pub fn activate(&self) 应用当前 mapping页表
+    /// 添加一个 [`Segment`] 的内存映射
+    pub fn add_segment(&mut self, segment: Segment, init_data: Option<&[u8]>) -> MemoryResult<()>
+
+    /// 移除一个 [`Segment`] 的内存映射
+    ///
+    /// `segment` 必须已经映射
+    pub fn remove_segment(&mut self, segment: &Segment) -> MemoryResult<()>
+/// 检测一段内存区域和已有的是否存在重叠区域
+    pub fn overlap_with(&self, range: Range<VirtualPageNumber>) -> bool
+
+
+
+
+
+虚拟内存的一些概念
+Sv39模式
+虚拟地址    63:39      38:30      29:21     20:12       11:0
+        与38位相同      VPN[2]    VPN[1]    VPN[0]      offset            
+
+物理地址
+            55:30      29:21      20:12       11:0
+            PPN[2]     PPN[1]    PPN[0]        offset 
+
+多级页表结构
+页表基址
+页表项
+pub struct PageTableEntry(usize);
+/***RUST***/
+
+解引用
+可以实现自动解引用功能
+std::ops::Deref
+std::ops::DerefMut
+pub trait Deref{
+    type Target: 
+    fn deref(&self) -> &Self::Target;
+}
+pub trait DerefMut{
+    type Target: 
+    fn deref(&mut self) -> &mut Self::Target;
+}
+
+闭包原理实现
+
+fn main(){
+    let x =1_i32;
+    let add_x = |a| a+x;
+    let result = add_x(5);
+}
+-----------------------
+struct Closure{
+    inner1:i32;
+}
+impl Closure{
+    fn call(&self,a:i32)->i32{
+        self.inner1 +a 
+    }
+}
+fn main(){
+    let x =1_i32;
+    let add_x = Closure{inner1:x};
+    let result = add_x.call(5);
+}
+结构体内部成员应该用什么类型？
+编译器尽量选择对外部影响最小的方式
+self用什么类型？
+顺序  Fn FnMut FnOnce
+
+move 关键字
+
+fn make_adder(x:i32) -> Box<Fn(i32)->i32>{
+    Box::new(|y| x+y)
+}
+fn make_adder(x:i32) -> Box<Fn(i32)->i32>{
+    Box::new(move |y| x+y)
+}
+
+Fn\FnMut\FnOnce
+
+pub trait FnOnce<Args>{
+    type Output;
+    extern "rust-call" fn call_once(self,arg:Args) -> Self::Output;
+}
+闭包只能使用一次，使用完后闭包的声明周期结束
+
+pub trait Fn<Args>{
+    type Output;
+    extern "rust-call" fn call_once(&self,arg:Args) -> Self::Output;
+}
+pub trait FnMut<Args>{
+    type Output;
+    extern "rust-call" fn call_once(&mut self,arg:Args) -> Self::Output;
+}
+迭代器
+
+
+
+
+
+

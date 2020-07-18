@@ -1,0 +1,176 @@
+7月4日学习报告
+目标：Lab2 物理内存管理
+     Lab3 虚拟内存管理
+
+进度：实现了FirstFitAllocator
+     实现了一次分配多个页面
+修改FrameTracker  增加页面计数功能
+pub struct FrameTracker(pub(super) PhysicalPageNumber,pub usize);
+
+
+修改trait Allocator
+
+pub trait Allocator {
+    /// 给定容量，创建分配器
+    fn new(capacity: usize) -> Self;
+    /// 分配一个元素，无法分配则返回 `None`
+    fn alloc(&mut self) -> Option<usize>;
+    /// 回收一个元素
+    fn dealloc(&mut self, index: usize, num:usize);
+    
+    fn alloc_frames(&mut self,num:usize) -> Option<usize>;
+}
+
+
+实现 FirstFitAllocator
+
+
+use super::Allocator;
+use alloc::{vec, vec::Vec};
+
+
+pub struct FirstFitAllocator {
+    list: Vec<(usize,usize)>
+}
+
+impl Allocator for FirstFitAllocator {
+    fn new(capacity: usize) -> Self {
+        Self {
+            list: vec![(0, capacity)],
+        }
+    }
+
+    fn alloc(&mut self) -> Option<usize> {
+        self.alloc_frames(1)
+    }
+    fn alloc_frames(&mut self,num:usize) -> Option<usize>
+    {
+        let size = self.list.len();
+        for i in 0..size {
+            let  (x,y) = self.list[i];
+            if y-x<num {
+                continue;
+            }
+            let re:usize = x;
+            self.list[i] = ( x+num,y);
+            if x== y {
+                self.list.remove(i);
+            }
+            return Some(re)
+        }
+        return None;
+    }
+    fn dealloc(&mut self, index: usize,num:usize) {
+        
+        let size =self.list.len();
+        if size ==0 {
+            self.list.push((index, index + num));
+        }
+        if(size ==1){
+            let (x,y) = self.list[0];
+            if(x==index+num){
+                self.list[0] = (index,y);
+            }else if(y==index){
+                self.list[0] = (x,y+num);
+            }else if(x>index+num){
+                self.list.insert(0,(index, index + num));
+            }else{
+                self.list.insert(1,(index, index + num));
+            }
+            return;
+        }
+        let (x,y)= self.list[0];
+        if(x==index+num){
+            self.list[0] = (index,y);
+            return;
+        }else if (x>index+num){
+            self.list.insert(0,(index,index+num));
+            return ;
+        }
+        
+        for i in 0..size{
+            let (x,y) = self.list[i];
+
+            let (m,n) = self.list[i+1];
+            if y<= index && m>=index+num{
+                if(y==index && m == index+num){
+                    self.list.remove(i+1);
+                    self.list[i]=(x,n);
+                    return 
+                }
+                if(y==index && m<index+num){
+                    self.list[i] = (x,y+num);
+                    return ;
+                }
+                if(y<index && m==index+num){
+                    self.list[i+1] = (index,n);
+                    return ;
+                }
+                if(y<index && m>index +num){
+                    self.list.insert(i+1,(index,index+num));
+                    return;
+                }
+            }else {continue;}
+        }
+        let (m,n)= self.list[size-1];
+        if(n==index){
+            self.list[size-1] = (m,n+num);
+            return;
+        }else if (n<index+num){
+            self.list.insert(size,(index,index+num));
+            return ;
+        }
+    }
+}
+
+
+核为所有应用进程使用的内存资源做了抽象，形成了一个从虚拟的地址空间到实际地址空间的自动转换功能，这样子可以极大的简化用户态程序的设计。
+虚拟地址：用户程序访问的地址
+虚拟地址 --》 映射机构 --》实际内存地址
+操作系统负责其中的映射
+实现映射的方法就是页表
+
+
+本次实验采用 SV39的实现方式
+
+
+/*linker script*/
+每一个链接过程都由链接脚本(linker script, 一般以lds作为文件的后缀名)控制. 链接脚本主要用于规定如何把输入文件内的section放入输出文件内, 并控制输出文件内各部分在程序地址空间内的布局. 
+2.基本概念
+链接器把一个或多个输入文件合成一个输出文件
+输入文件: 目标文件或链接脚本文件.
+输出文件: 目标文件或可执行文件.
+3.例子
+SECTIONS
+{
+. = 0x10000;    //定位器符号设置为0x10000
+.text : { *(.text) }   
+. = 0x8000000;
+.data : { *(.data) }
+.bss : { *(.bss) }  //.bss装载位置 为0x8000000+.data section 大小
+}
+4.简单脚本命令
+
+ENTRY(SYMBOL) :将符号SYMBOL的值设置成入口地址。
+OUTPUT_ARCH(BFDARCH)：设置输出文件的machine architecture(体系结构)，BFDARCH为被BFD库使用的名字之一。可以用命令objdump -f查看。
+ALIGN(4K)
+等价于
+while ((current_location & 4K) != 0)
+  *current_location++ = padding_value;
+
+
+
+/*risc-v汇编语言*/
+li rd, immediate
+x[rd] = immediate
+将常量加载到 x[rd]中。
+
+srli rd, rs1, shamt
+立即数逻辑右移
+
+.quad	expression [, expression]*	64-bit comma separated words
+
+.zero	integer	zero bytes
+
+LUI：创建32位无符号整数，存放立即数到rd的高20位，低12位置0
+

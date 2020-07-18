@@ -1,0 +1,36 @@
+主模块报告 7.8
+
+系统启动流程
+
+OpenSBI 将自身代码放在 [0x80000000,0x80200000) 中，而内核代码放在以 0x80200000 开头的一块连续物理内存中；
+由于linker.ld中指明了存放地址为
+BASE_ADDRESS = 0xffffffff80200000；即内核的内部跳转标号等使用的都是该虚拟地址开始，尽管内核本身转载在0x80200000
+从 entry.asm 的_start 标号开始首先设置好Sv39虚拟内存模式所要用的csr寄存器，此时访问地址开始使用虚拟地址模式，根据页表寻找物理地址再访问，然后设置sp为内核栈top地址，跳转入rust_main。
+
+进入rust_main开始对内核各模块开始分步初始化
+
+首先要重建一个更加完善的虚拟页表，所以先从memory开始
+memory::init();
+interrupt::init();
+drivers::init(dtb_pa);  //参数 dtb_pa: PhysicalAddress 为opensbi自动传入
+fs::init();
+
+然后从文件系统中找出两个预先编好的elf进程文件装载入内存并添加进thread
+最后通过PROCESSOR.get().run() 开始让调度器执行所有线程  // 此调用不再返回
+
+//src/sbi.rs 文件设置了一些M层的调用功能，而我们的内核运行在S态
+
+//src/console.rs 文件定义了关于println! 和 print!的宏，便于我们打印内核信息
+
+//src/panic.rs 文件定义了panic!  调用后的回调函数 panic_handler 
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,125 @@
+7月1日学习报告
+目标：Lab2 物理内存管理
+
+物理页：
+实际进行内存管理的时候并不是按照字节来管理的，而是将内存划分为页面，每个页面4K大小。
+
+分配和回收：
+页面的追踪
+pub struct FrameTracker(PhysicalAddress);
+该类实现了两个函数：
+     pub fn address(&self) -> PhysicalAddress
+     pub fn page_number(&self) -> PhysicalPageNumber  分别返回当前物理地址或页号   
+同时
+impl Drop for FrameTracker {
+    fn drop(&mut self) {
+        FRAME_ALLOCATOR.lock().dealloc(self);
+    }
+}
+功能是在析构时自动释放所指向的内存页
+
+
+pub static ref FRAME_ALLOCATOR: Mutex<FrameAllocator<AllocatorImpl>>
+为页面的分配器指针实例化
+
+/// 基于线段树的帧分配 / 回收
+pub struct FrameAllocator<T: Allocator> {
+    /// 可用区间的起始
+    start_ppn: PhysicalPageNumber,
+    /// 分配器
+    allocator: T,
+}
+实现了 
+    pub fn new(range: impl Into<Range<PhysicalPageNumber>> + Copy) -> Self
+
+    pub fn alloc(&mut self) -> MemoryResult<FrameTracker>
+
+    pub(super) fn dealloc(&mut self, frame: &FrameTracker)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+impl trait 
+表达一个 既存类型（Existential types） ，我们可以理解为一个实现了一个特征的 具体对象 。
+Rust 要求必须返回一个具体的类型而不是一个抽象，因为抽象对于Rust是一个模糊信息。
+fn get_iter() -> Iterator<Item=u8> {
+    // ...
+}   //编译不能通过  因为返回了一个抽象
+
+使用装箱语法意味着我们在返回时需要使用 Box::new() 包装，但是使用装箱意味着这一过程属于运行时的动态分派，无法再将对象定于栈上。
+fn build_trait() -> Box<Iterator<Item=u8>> {
+    // ...
+}
+除此之外，我们可能还有另外的需求，就是返回一个匿名函数，这在当下业务场景中十分常见，根据上面的描述，我们若想要返回一个匿名函数，代码得如下书写：
+fn foo<T>(add: u8) -> Box<T>
+    where T: Fn(u8) -> u8
+{
+    Box::new(move |origin: u8| {
+        origin + add
+    })
+}
+因为匿名函数是编译器生成的匿名类型，根本不存在具体对象一说，这意味着它无法有一个明确的 size，所以只能被放置于 堆内存 之中，并取得一个 胖指针
+
+
+泛型：
+enum Option<T>{
+    Some(T),
+    None,
+}
+可以有默认值
+struct S<T=i32>{
+    data:T
+}
+使用    S{data:0}    S::<bool>{data:true}    let左端和右端都可以不明确指明类型
+
+若是结构体声明了一个泛型参数，但是并没有使用，就会报错
+struct Num<T>{
+    data:i32
+}
+-->
+struct Num<T>{
+    data:Option<T>
+}
+
+函数中的泛型
+fn compare_option<T1,T2>(first:Option<T1>,second:Option<T2>) ->bool{
+    ...
+}
+一般情况下，调用泛型函数不用指定参数，可自动推导
+也可以手动指定 compare_option::<i32,f32>(Some(1),Some(1.0));
+值得注意Rust并没有C++的函数重载功能，推荐使用泛型代替
+
+impl中的泛型
+impl中出现的范型参数都必须在impl关键词后面加上
+
+泛型参数约束:
+fn max<T:PartialOrd>(a:T,b:T)->T{
+    ...
+}
+
+fn max<T>(a:T,b:T)->T
+    where T:PartialOrd{
+
+    }
+关联类型： 在trait中声明的类型叫做关联类型
+pub trait Iterator{
+    type Item;
+    ...
+}
+
+

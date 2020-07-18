@@ -1,0 +1,109 @@
+内核语法注意
+/*************************************************************/
+extern "C" {
+    /// 由 `linker.ld` 指定的内核代码结束位置
+    ///
+    /// 作为变量存在 [`static@KERNEL_END_ADDRESS`]
+    fn kernel_end();
+}
+由此来引用
+linker中定义的标号
+    kernel_end = .;  运行时求值
+
+/*************************************************************/
+Rust裸指针
+*const T和*mut T在Rust中被称为“裸指针”
+注意：
+不能保证指向有效的内存
+没有任何自动清除
+它不移动所有权
+缺少任何形式的生命周期
+
+创建裸指针是安全的
+let x = 5;
+let raw = &x as *const i32;   //&类似c语言取址的概念
+let mut y = 10;
+let raw_mut = &mut y as *mut i32;
+
+解引用时需要使用unsafe
+
+
+
+*const T   <-> VirtualAddress
+impl<T> From<* const T> for VirtualAddress{
+    fn from(pointer: *const T)->Self{
+        Self(pointer as usize)
+    }
+}
+
+//use   let pointer = &Object as *const Object; 
+        let v:VirtualAddress =  VirtualAddress::from(pointer);
+
+/*************************************************************/
+VirtualAddress自动解引用功能
+impl  VirtualAddress{
+    fn deref<T>(self)->&'static mut T{
+        unsafe {&mut  *(self.0 as *mut T) }
+    }
+}
+
+VirtualPageNumber自动解引用功能
+impl  VirtualAddress{
+    fn deref(self)->&'static mut [u8;PAGE_SIZE]{
+        VirtualAddress::from(self).deref()
+    }
+}
+/*************************************************************/
+宏语法
+macro_rules! some_macro{
+    ($address_type: ty, $page_number_type: ty)  =>{  //ty为类型
+
+    }       
+}
+some_macro!{type1 , type2}
+or
+some_macro! (type1 , type2);
+
+/*************************************************************/
+适配器 map
+对迭代器里取出的值作出改变
+
+    pub fn iter(&self) -> impl Iterator<Item = T> {
+        (self.start.into()..self.end.into()).map(T::from)
+    }
+/*************************************************************/
+crate以及模块
+导入外部的包装箱
+extern crate phrases; 声明告诉Rust我们需要编译和链接phrases包装箱 记得加pub 在mod和fn前
+
+use phrases::english::greetings;
+use phrases::english::farewells;
+
+好于 use phrases::english::greetings::hello;
+
+use phrases::english::{greetings, farewells}; 简写
+
+使用pub use重导出
+pub use声明将这些函数导入到了我们模块结构空间中
+
+/*************************************************************/
+pub(in self)，可以不写出来，意思是“以当前模块为根的子树可以访问”
+pub(in crate::xxx::yyy) 就是“以crate::xxx::yyy为根的子树可以访问”。
+pub(in super)   
+
+
+
+
+/*************************************************************/
+
+let data = unsafe { slice::from_raw_parts(dtb_va.0 as *const u8, size as usize) };
+
+pub unsafe fn from_raw_parts<'a, T>(data: *const T, len: usize) -> &'a [T]
+将该地址的东西变成&[T]
+  
+/*************************************************************/
+let context = (parked_frame.sp() - size_of::<Context>()) as *mut Context;
+unsafe { *context = parked_frame };
+
+
+

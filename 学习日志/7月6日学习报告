@@ -1,0 +1,328 @@
+7月6日学习报告
+目标： Lab4 进程调度
+
+基本概念： 
+进程得到了操作系统的资源支持：程序的代码、数据段被加载到内存中，程序所需的虚拟内存空间被真正构建出来。
+同时操作系统还给进程分配了程序所要求的各种其他资源，如我们上面几个章节中提到过的页表、文件的资源。
+为了能够进行函数调用，我们还需要运行栈（Stack）
+这样的一个借助 CPU 和栈的执行流，我们称之为线程 (Thread) 
+
+线程的表示
+
+/// 线程的信息
+pub struct Thread {
+    /// 线程 ID
+    pub id: ThreadID,
+    /// 线程的栈
+    pub stack: Range<VirtualAddress>,
+    /// 线程执行上下文
+    ///
+    /// 当且仅当线程被暂停执行时，`context` 为 `Some`
+    pub context: Mutex<Option<Context>>,
+    /// 所属的进程
+    pub process: Arc<RwLock<Process>>,
+}
+
+进程的表示
+/// 进程的信息
+pub struct Process {
+    /// 是否属于用户态
+    pub is_user: bool,
+    /// 进程中的线程公用页表 / 内存映射
+    pub memory_set: MemorySet,  //进程中的线程会共享同一个页表，即互相可以访问空间。
+}
+
+
+线程的创建
+1.建立页表映射，需要包括以下映射空间：
+    线程所执行的一段指令
+    线程执行栈
+    操作系统的部分内存空间   //为什么用户线程需要映射操作系统部分空间？  涉及到一些系统调用，中断的时候，需要访问内核空间
+2.一个起始执行的地址
+3.初始化各种寄存器，比如 sp
+4.可选：一些执行参数（例如 argc argv 这样的）
+
+
+发生内核态中断过程：   //硬件自动设置
+sepc 被设置为中断处理后应该执行的指令
+sstatus 中的 SIE 位置零以禁用中断
+并把先前的 SIE 值保留到 SPIE 中 
+发生异常之前的权限模式保留在 sstatus 的 SPP 域中
+
+返回
+处理程序用 sret 指令（S 模
+式特有的指令）返回。sret 将 PC 设置为 sepc，通过将 sstatus 的 SPIE 域复制到
+SIE 来恢复之前的中断使能设置，并将权限模式设置为 sstatus 的 SPP 域中的值。
+
+
+
+__restore 现在会将 a0 寄存器视为一个 *mut Context 来读取，因此我们在执行第一个线程时只需调用 __restore(context)。
+
+那么，如果是程序发生了中断，执行到 __restore 的时候，a0 的值又是谁赋予的呢？
+答：  
+`interrupt.asm` 首先保存寄存器至 Context，其作为参数和 scause 以及 stval 一并传入handle_interrupt函数 ,
+pub fn handle_interrupt(context: &mut Context, scause: Scause, stval: usize) -> *mut Context 
+返回的*Context 保存在a0中
+然后ret进入__restore  
+
+
+
+如果我们令 handle_interrupt 返回另一个线程的 *mut Context，就可以在时钟中断后跳转到这个线程来执行。
+
+
+思考：在 run 函数中，我们在一开始就激活了页表，会不会导致后续流程无法正常执行？
+内核空间会被映射到每一个进程的相应虚拟地址上
+
+
+内核栈
+
+
+
+//源码分析
+src/process/thread.rs
+线程 最小的运行单元
+/// 线程的信息
+pub struct Thread {
+    /// 线程 ID
+    pub id: ThreadID,
+    /// 线程的栈
+    pub stack: Range<VirtualAddress>,
+    /// 所属的进程
+    pub process: Arc<RwLock<Process>>,
+    /// 用 `Mutex` 包装一些可变的变量
+    pub inner: Mutex<ThreadInner>,    //ThreadInner为线程的保存了线程的当前状态，包括了打开的文件的inode
+}
+
+
+/// 线程中需要可变的部分
+pub struct ThreadInner {
+    /// 线程执行上下文
+    ///
+    /// 当且仅当线程被暂停执行时，`context` 为 `Some`
+    pub context: Option<Context>,
+    /// 是否进入休眠
+    pub sleeping: bool,
+    // 打开的文件
+    //pub descriptors: Vec<Arc<dyn INode>>,   //还未实现文件系统
+}
+
+ 
+impl for Thread
+    pub fn prepare(&self) -> *mut Context    //准备运行该线程，激活页表， 从ThreadInner中取出Context，放在栈上，准备弹出  返回Context 所在地址
+    pub fn park(&self, context: Context)     //线程切换时用来保存Context
+    pub fn new(
+        process: Arc<RwLock<Process>>,   //进程
+        entry_point: usize,            //入口
+        arguments: Option<&[usize]>,    //参数
+    ) -> MemoryResult<Arc<Thread>>       //新建线程   
+
+            步骤：   创建线程栈
+                    构建新的context    
+                    打包成线程
+        let thread = Arc::new(Thread {
+            id: unsafe {
+                THREAD_COUNTER += 1;
+                THREAD_COUNTER
+            },
+            stack,
+            process,
+            inner: Mutex::new(ThreadInner {
+                context: Some(context),
+                sleeping: false,
+                //descriptors: vec![STDIN.clone(), STDOUT.clone()],
+            }),
+        });
+                    返回
+ 
+ impl PartialEq for Thread  判断线程id是否相同
+
+
+src/process/process.rs
+/// 进程的信息
+pub struct Process {
+    /// 是否属于用户态
+    pub is_user: bool,
+    /// 进程中的线程公用页表 / 内存映射
+    pub memory_set: MemorySet,
+}
+impl for 
+    /// 创建一个内核进程
+    pub fn new_kernel() -> MemoryResult<Arc<RwLock<Self>>>
+    /// 创建进程，从文件中读取代码
+    pub fn from_elf(file: &ElfFile, is_user: bool) -> MemoryResult<Arc<RwLock<Self>>>   //待学习 
+
+    /// 分配一定数量的连续虚拟空间
+    ///
+    /// 从 `memory_set` 中找到一段给定长度的未占用虚拟地址空间，分配物理页面并建立映射。返回对应的页面区间。
+    ///
+    /// `flags` 只需包括 rwx 权限，user 位会根据进程而定。
+    pub fn alloc_page_range(
+        &mut self,
+        size: usize,
+        flags: Flags,
+    ) -> MemoryResult<Range<VirtualAddress>>
+    计算alloc_size 页面对齐
+    找出虚拟空间范围  // 通过不断从小往大 overlap判断，如果和memoryset虚拟地址重复了就不断 + alloc_size 直到找到合适的大小
+    设置段
+    self.memory_set.add_segment(
+            Segment {
+                map_type: MapType::Framed,
+                range,
+                flags: flags | Flags::user(self.is_user),
+            },
+            None,
+        )?;
+    返回虚拟地址范围
+
+// src/process/processor.rs
+线程的调度和管理
+lazy_static! {
+    /// 全局的 [`Processor`]
+    pub static ref PROCESSOR: UnsafeWrapper<Processor> = Default::default();
+}
+
+#[derive(Default)]
+pub struct Processor {
+    /// 当前正在执行的线程
+    current_thread: Option<Arc<Thread>>,
+    /// 线程调度器，记录活跃线程
+    scheduler: SchedulerImpl<Arc<Thread>>,
+    /// 保存休眠线程
+    sleeping_threads: HashSet<Arc<Thread>>,
+}
+
+
+记录着操作系统中各种类型的线程
+impl for
+    /// 获取一个当前线程的 `Arc` 引用
+    pub fn current_thread(&self) -> Arc<Thread>
+        self.current_thread.as_ref().unwrap().clone()
+
+        //pub fn as_ref(&self) -> Option<&T>
+        Option<Arc<Thread>>   -》   Option<&Arc<Thread>>   -》  &Arc<Thread>  ---clone 》   Arc<Thread>
+        //Invoking clone on Arc produces a new Arc instance, which points to the same allocation on the heap as the source Arc,
+
+
+    /// 第一次开始运行
+    ///
+    /// 从 `current_thread` 中取出 [`Context`]，然后直接调用 `interrupt.asm` 中的 `__restore`
+    /// 来从 `Context` 中继续执行该线程。
+    ///
+    /// 注意调用 `run()` 的线程会就此步入虚无，不再被使用
+    pub fn run(&mut self) -> !
+
+        从 self.current_thread().prepare() 中找到 Context  然后  __restore(context as usize); 进入新线程
+
+    /// 激活下一个线程的 `Context`
+    pub fn prepare_next_thread(&mut self) -> *mut Context
+
+    /// 添加一个待执行的线程
+    pub fn add_thread(&mut self, thread: Arc<Thread>)
+
+
+    /// 唤醒一个休眠线程
+    pub fn wake_thread(&mut self, thread: Arc<Thread>)
+
+    /// 保存当前线程的 `Context`
+    pub fn park_current_thread(&mut self, context: &Context)
+
+ 
+    /// 令当前线程进入休眠
+    pub fn sleep_current_thread(&mut self)
+
+    /// 终止当前的线程
+    pub fn kill_current_thread(&mut self)
+
+
+// src/process/kernel_stack.rs
+/// 内核栈
+
+pub struct KernelStack([u8; KERNEL_STACK_SIZE]);
+/// 公用的内核栈
+pub static KERNEL_STACK: KernelStack = KernelStack([0; KERNEL_STACK_SIZE]);
+
+impl for
+    /// 在栈顶加入 Context 并且返回新的栈顶指针
+    pub fn push_context(&self, context: Context) -> *mut Context 
+
+新建process  new_kernel() 或from_elf()
+新建thread       pub fn new(
+        process: Arc<RwLock<Process>>,
+        entry_point: usize,
+        arguments: Option<&[usize]>,
+    ) -> MemoryResult<Arc<Thread>>
+
+//mapping Framed
+
+pub fn map(
+        &mut self,
+        segment: &Segment,
+        init_data: Option<&[u8]>,
+    ) -> MemoryResult<Vec<(VirtualPageNumber, FrameTracker)>>
+
+        segment.MapType::Framed =>
+            对每个虚拟页面进行分配物理页面
+            用map_one来建立虚拟地址到物理地址的页表项
+            用 allocated_pairs.push((vpn, frame)); 绑定对应虚拟地址和物理页面
+
+            // 拷贝数据，注意页表尚未应用，无法直接从刚刚映射的虚拟地址访问，因此必须用物理地址 + 偏移来访问。
+
+线程上下文设计
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Context {
+    /// 通用寄存器
+    pub x: [usize; 32],
+    /// 保存诸多状态位的特权态寄存器
+    pub sstatus: Sstatus,
+    /// 保存中断地址的特权态寄存器
+    pub sepc: usize,
+}
+
+impl Default for Context {
+    fn default() -> Self {
+        unsafe { zeroed() }
+    }
+}   //默认初始化方法
+
+impl for 
+    pub fn sp(&self) -> usize
+    pub fn set_sp(&mut self, value: usize) -> &mut Self
+    /// 获取返回地址
+    pub fn ra(&self) -> usize
+    /// 设置返回地址
+    pub fn set_ra(&mut self, value: usize) -> &mut Self
+
+    /// 按照函数调用规则写入参数
+    ///
+    /// 没有考虑一些特殊情况，例如超过 8 个参数，或 struct 空间展开
+    pub fn set_arguments(&mut self, arguments: &[usize]) -> &mut Self
+
+    /// 为线程构建初始 `Context`
+    pub fn new(
+        stack_top: usize,
+        entry_point: usize,
+        arguments: Option<&[usize]>,
+        is_user: bool,
+    ) -> Self
+
+    创建一个全0的Context结构体
+    // 设置栈顶指针
+        context.set_sp(stack_top).set_ra(-1isize as usize);
+
+
+
+
+/*****Rust*****/
+pub struct RwLock<T: ?Sized> { /* fields omitted */ }
+This type of lock allows a number of readers or at most one writer at any point in time.
+
+
+Mutex<T>  使用 .lock()   后得到 MutexGuard<T>  实现了deref trait  可直接用里面的T
+
+
+
+
+
+
+
